@@ -333,9 +333,9 @@ contains
     character(len=8), dimension(3) :: dim_names_3d, dim_names_3d2, dim_names_3d3, dim_names_3d4
     character(len=6)  :: stile_name
     character(len=64) :: tracer_name
-    character(len=64) :: fn_gfs_ctl = 'INPUT/gfs_ctrl.nc'
-    character(len=64) :: fn_gfs_ics = 'INPUT/gfs_data.nc'
-    character(len=64) :: fn_sfc_ics = 'INPUT/sfc_data.nc'
+    character(len=64) :: fn_gfs_ctl
+    character(len=64) :: fn_gfs_ics
+    character(len=64) :: fn_sfc_ics
     character(len=64) :: fn_oro_ics = 'INPUT/oro_data.nc'
     logical :: remap
     logical :: filtered_terrain = .true. !< use orography-maker filtered terrain for remapping and model orography
@@ -354,6 +354,10 @@ contains
 
     ! variables for reading the dimension from the gfs_ctrl
     integer ncid, levsp
+
+    fn_gfs_ctl = trim(inputdir)//'/'//'gfs_ctrl.nc'
+    fn_gfs_ics = trim(inputdir)//'/'//'gfs_data.nc'
+    fn_sfc_ics = trim(inputdir)//'/'//'sfc_data.nc'
 
     call mpp_error(NOTE,'Using external_IC::get_nggps_ic which is valid only for data which has been &
                         &horizontally interpolated to the current cubed-sphere grid')
@@ -1804,12 +1808,15 @@ contains
       type(FmsNetcdfFile_t) :: Gfs_ctl
       integer, allocatable, dimension(:) :: pes !< Array of the pes in the current pelist
       character(len=64) :: fn_oro_ics = 'INPUT/oro_data.nc'
-      character(len=64) :: fn_gfs_ics = 'INPUT/gfs_data.nc'
-      character(len=64) :: fn_gfs_ctl = 'INPUT/gfs_ctrl.nc'
+      character(len=64) :: fn_gfs_ics
+      character(len=64) :: fn_gfs_ctl
       character(len=20) :: suffix
       character(len=1) :: tile_num
       logical :: filtered_terrain = .true.
       namelist /external_ic_nml/ filtered_terrain
+
+      fn_gfs_ics = trim(inputdir)//'/'//'gfs_data.nc'
+      fn_gfs_ctl = trim(inputdir)//'/'//'gfs_ctrl.nc'
 
       is  = Atm%bd%is
       ie  = Atm%bd%ie

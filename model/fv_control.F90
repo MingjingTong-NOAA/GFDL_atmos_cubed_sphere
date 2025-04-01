@@ -277,6 +277,10 @@ module fv_control_mod
      logical , pointer :: external_eta
      logical , pointer :: is_ideal_case
      logical , pointer :: read_increment
+     logical , pointer :: increment_file_on_native_grid
+     logical , pointer :: analysis_on_native_grid
+     logical , pointer :: compute_iau_inc
+     logical , pointer :: write_iau_inc
      logical , pointer :: hydrostatic
      logical , pointer :: phys_hydrostatic
      logical , pointer :: use_hydro_pressure
@@ -813,7 +817,10 @@ module fv_control_mod
        external_eta                  => Atm%flagstruct%external_eta
        is_ideal_case                 => Atm%flagstruct%is_ideal_case
        read_increment                => Atm%flagstruct%read_increment
-
+       increment_file_on_native_grid => Atm%flagstruct%increment_file_on_native_grid
+       analysis_on_native_grid       => Atm%flagstruct%analysis_on_native_grid
+       compute_iau_inc               => Atm%flagstruct%compute_iau_inc
+       write_iau_inc                 => Atm%flagstruct%write_iau_inc
        hydrostatic                   => Atm%flagstruct%hydrostatic
        phys_hydrostatic              => Atm%flagstruct%phys_hydrostatic
        use_hydro_pressure            => Atm%flagstruct%use_hydro_pressure
@@ -956,7 +963,8 @@ module fv_control_mod
             write_only_coarse_intermediate_restarts, &
             write_coarse_agrid_vel_rst, write_coarse_dgrid_vel_rst, &
             restart_from_agrid_winds, write_optional_dgrid_vel_rst, &
-            pass_full_omega_to_physics_in_non_hydrostatic_mode, ignore_rst_cksum
+            pass_full_omega_to_physics_in_non_hydrostatic_mode, ignore_rst_cksum, &
+            increment_file_on_native_grid,analysis_on_native_grid,compute_iau_inc,write_iau_inc
 
 
        ! Read FVCORE namelist

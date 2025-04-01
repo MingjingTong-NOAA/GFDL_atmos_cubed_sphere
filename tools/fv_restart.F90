@@ -38,7 +38,8 @@ module fv_restart_mod
   use fv_arrays_mod,       only: radius, omega ! scaled for small earth
   use fv_arrays_mod,       only: fv_atmos_type, fv_nest_type, fv_grid_bounds_type, R_GRID
   use fv_io_mod,           only: fv_io_init, fv_io_read_restart, fv_io_write_restart, &
-                                 remap_restart, fv_io_write_BCs, fv_io_read_BCs
+                                 remap_restart, fv_io_write_BCs, fv_io_read_BCs, &
+                                 fv_io_write_iau_inc
   use fv_grid_utils_mod,   only: ptop_min, fill_ghost, g_sum, &
                                  make_eta_level, cubed_to_latlon, great_circle_dist
   use fv_diagnostics_mod,  only: prt_maxmin, gn
@@ -62,9 +63,12 @@ module fv_restart_mod
   use fv_surf_map_mod,     only: del2_cubed_sphere, del4_cubed_sphere
   use boundary_mod,        only: fill_nested_grid, nested_grid_BC, update_coarse_grid
   use fv_timing_mod,       only: timing_on, timing_off
-  use fv_treat_da_inc_mod, only: read_da_inc
+  use fv_treat_da_inc_mod, only: read_da_inc, read_da_inc_cubed_sphere
   use fv_regional_mod,     only: write_full_fields
   use coarse_grained_restart_files_mod, only: fv_io_write_restart_coarse
+  use cubed_sphere_inc_mod, only: increment_data_type
+  use fv_iau_mod,          only: IAU_state, IAU_state_initialize
+  use tracer_manager_mod, only: get_number_tracers
 
   implicit none
   private
@@ -137,6 +141,8 @@ contains
     integer, allocatable :: ideal_test_case(:), new_nest_topo(:)
     integer :: nest_level
     integer, allocatable :: BC_remap_level(:)
+
+    type(increment_data_type) :: increment_data
 
     rgrav = 1. / grav
 
@@ -265,6 +271,12 @@ contains
           !4. Restart
           elseif (do_read_restart) then
 
+             if (.not. Atm(n)%flagstruct%analysis_on_native_grid .and. Atm(n)%flagstruct%compute_iau_inc) then
+                if( is_master() ) write(*,*) 'Compute iau increment'
+                call IAU_state_initialize(Atm(n))
+                call compute_iau_increment(Atm(n), IAU_state%inc1)
+             endif
+
              if ( Atm(n)%flagstruct%npz_rst /= 0 .and. Atm(n)%flagstruct%npz_rst /= Atm(n)%npz ) then
                 !Remap vertically the prognostic variables for the chosen vertical resolution
                 if( is_master() ) then
@@ -278,18 +290,7 @@ contains
                 if( is_master() ) write(*,*) 'Done remapping dynamical IC'
              else
                 if( is_master() ) write(*,*) 'Warm starting, calling fv_io_restart'
-                call fv_io_read_restart(Atm(n)%domain_for_read,Atm(n:n))
-                !====== PJP added DA functionality ======
-                if (Atm(n)%flagstruct%read_increment) then
-                   ! print point in middle of domain for a sanity check
-                   i = (Atm(n)%bd%isc + Atm(n)%bd%iec)/2
-                   j = (Atm(n)%bd%jsc + Atm(n)%bd%jec)/2
-                   k = Atm(n)%npz/2
-                   if( is_master() ) write(*,*) 'Calling read_da_inc',Atm(n)%pt(i,j,k)
-                   call read_da_inc(Atm(n), Atm(n)%domain)
-                   if( is_master() ) write(*,*) 'Back from read_da_inc',Atm(n)%pt(i,j,k)
-                endif
-                !====== end PJP added DA functionailty======
+                call fv_io_read_restart(Atm(n)%domain_for_read,Atm(n))
              endif
 
              seconds = 0; days = 0   ! Restart needs to be modified to record seconds and days.
@@ -403,7 +404,27 @@ contains
 
           endif !external_ic vs. restart vs. idealized
 
-
+          !====== PJP added DA functionality ======
+           if (Atm(n)%flagstruct%read_increment) then
+              ! print point in middle of domain for a sanity check
+              i = (Atm(n)%bd%isc + Atm(n)%bd%iec)/2
+              j = (Atm(n)%bd%jsc + Atm(n)%bd%jec)/2
+              k = Atm(n)%npz/2
+              if ( Atm(n)%flagstruct%increment_file_on_native_grid ) then
+                 if( is_master() ) write(*,*) 'Calling read_da_inc_cubed_sphere',Atm(n)%pt(i,j,k)
+                 call read_da_inc_cubed_sphere(Atm(n), Atm(n)%domain, Atm(n)%bd, Atm(n)%npz, Atm(n)%ncnst, &
+                      Atm(n)%u, Atm(n)%v, Atm(n)%q, Atm(n)%delp, Atm(n)%pt, Atm(n)%delz, isd, jsd, ied, jed, &
+                      isc, jsc, iec, jec )
+                 if( is_master() ) write(*,*) 'Back from read_da_inc_cubed_sphere',Atm(n)%pt(i,j,k)
+              else
+                 if( is_master() ) write(*,*) 'Calling read_da_inc',Atm(n)%pt(i,j,k)
+                 call read_da_inc(Atm(n), Atm(n)%domain, Atm(n)%bd, Atm(n)%npz, Atm(n)%ncnst, &
+                      Atm(n)%u, Atm(n)%v, Atm(n)%q, Atm(n)%delp, Atm(n)%pt, Atm(n)%delz, isd, jsd, ied, jed, &
+                      isc, jsc, iec, jec )
+                 if( is_master() ) write(*,*) 'Back from read_da_inc',Atm(n)%pt(i,j,k)
+              endif
+           endif
+           !====== end PJP added DA functionailty======
        endif !n==this_grid
 
 
@@ -1431,6 +1452,82 @@ contains
   end subroutine fv_restart_end
   ! </SUBROUTINE> NAME="fv_restart_end"
 
+  !#######################################################################
+  ! <SUBROUTINE NAME="compute_iau_increment">
+  ! <DESCRIPTION>
+  !  Compute single time iau increments from external ic and forecast
+  ! </DESCRIPTION>
+  subroutine compute_iau_increment(Atm, increment_data)
+    type(fv_atmos_type), intent(inout) :: Atm
+    type(increment_data_type), intent(inout) :: increment_data
+
+    integer :: is,  ie,  js,  je
+    integer :: npz,ntracers
+    integer:: i, j, k, l
+
+    is  = Atm%bd%isc
+    ie  = Atm%bd%iec
+    js  = Atm%bd%jsc
+    je  = Atm%bd%jec
+    npz = Atm%npz
+
+    call get_number_tracers(MODEL_ATMOS, num_tracers=ntracers)
+
+    increment_data%ua_inc=0.0
+    increment_data%va_inc=0.0
+    increment_data%temp_inc=0.0
+    increment_data%delp_inc=0.0
+    increment_data%delz_inc=0.0
+    increment_data%tracer_inc=0.0
+
+    ! read external analysis
+    call get_external_ic(Atm, .false., icdir='EXTIC')
+    ! compute ua, va of external ic and hold by increment_data'
+    call cubed_to_latlon(Atm%u, Atm%v, Atm%ua, Atm%va, &
+                         Atm%gridstruct, &
+                         Atm%npx, Atm%npy, npz, 1, &
+                         Atm%gridstruct%grid_type, Atm%domain, &
+                         Atm%gridstruct%bounded_domain, 4, Atm%bd)
+
+    ! temporarily hold analysis using increment_data
+    do j = js,je
+       do i = is,ie
+          do k = 1,npz
+             increment_data%ua_inc(i,j,k) = Atm%ua(i,j,k)
+             increment_data%va_inc(i,j,k) = Atm%va(i,j,k)
+             increment_data%temp_inc(i,j,k) = Atm%pt(i,j,k)
+             increment_data%delp_inc(i,j,k) = Atm%delp(i,j,k)
+             increment_data%delz_inc(i,j,k) = Atm%delz(i,j,k)
+             do l=1,ntracers
+                increment_data%tracer_inc(i,j,k,l) = Atm%q(i,j,k,l)
+             enddo
+          enddo
+       enddo
+    enddo
+
+    ! read forecast restart file here
+    call fv_io_read_restart(Atm%domain_for_read,Atm,prefix='atmf006',directory='ATMFCST')
+    do j = js,je
+       do i = is,ie
+          do k = 1,npz
+             increment_data%ua_inc(i,j,k) = increment_data%ua_inc(i,j,k) - Atm%ua(i,j,k)
+             increment_data%va_inc(i,j,k) = increment_data%va_inc(i,j,k) - Atm%va(i,j,k)
+             increment_data%temp_inc(i,j,k) = increment_data%temp_inc(i,j,k) - Atm%pt(i,j,k)
+             increment_data%delp_inc(i,j,k) = increment_data%delp_inc(i,j,k) - Atm%delp(i,j,k)
+             increment_data%delz_inc(i,j,k) = increment_data%delz_inc(i,j,k) - Atm%delz(i,j,k)
+             do l=1,ntracers
+                increment_data%tracer_inc(i,j,k,l) = increment_data%tracer_inc(i,j,k,l) - Atm%q(i,j,k,l)
+             enddo
+          enddo
+       enddo
+    enddo
+
+    if (Atm%flagstruct%write_iau_inc) then
+      call fv_io_write_iau_inc(Atm, increment_data, "atminc")
+    endif
+
+  end subroutine compute_iau_increment
+  ! </SUBROUTINE>
 
 subroutine pmaxmn_g(qname, q, is, ie, js, je, km, fac, area, domain)
       character(len=*), intent(in)::  qname

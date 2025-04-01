@@ -65,6 +65,9 @@ module fv_iau_mod
   use fv_treat_da_inc_mod, only: remap_coef
   use tracer_manager_mod,  only: get_tracer_names,get_tracer_index, get_number_tracers
   use field_manager_mod,   only: MODEL_ATMOS
+! changes from dev/emc branch
+  use cubed_sphere_inc_mod, only : read_cubed_sphere_inc, increment_data_type
+  use fv_io_mod, only : fv_io_write_iau_inc
   implicit none
 
   private
@@ -87,14 +90,6 @@ module fv_iau_mod
   integer, allocatable :: tracer_indicies(:)
 
   real(kind=4), allocatable:: wk3(:,:,:)
-  type iau_internal_data_type
-    real,allocatable :: ua_inc(:,:,:)
-    real,allocatable :: va_inc(:,:,:)
-    real,allocatable :: temp_inc(:,:,:)
-    real,allocatable :: delp_inc(:,:,:)
-    real,allocatable :: delz_inc(:,:,:)
-    real,allocatable :: tracer_inc(:,:,:,:)
-  end type iau_internal_data_type
   type iau_external_data_type
     real,allocatable :: ua_inc(:,:,:)
     real,allocatable :: va_inc(:,:,:)
@@ -106,8 +101,8 @@ module fv_iau_mod
     logical          :: drymassfixer = .false.
   end type iau_external_data_type
   type iau_state_type
-      type(iau_internal_data_type):: inc1
-      type(iau_internal_data_type):: inc2
+      type(increment_data_type)   :: inc1
+      type(increment_data_type)   :: inc2
       real(kind=kind_phys)        :: hr1
       real(kind=kind_phys)        :: hr2
       real(kind=kind_phys)        :: wt
@@ -118,13 +113,14 @@ module fv_iau_mod
   public iau_external_data_type
 
 #ifdef GFS_PHYS
-  public IAU_initialize, getiauforcing
+  public IAU_initialize, getiauforcing, IAU_state, IAU_state_initialize
 
 contains
-subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
+subroutine IAU_initialize (IPD_Control, IAU_Data, Init_parm, Atm)
     type (IPD_control_type), intent(in) :: IPD_Control
     type (IAU_external_data_type), intent(inout) :: IAU_Data
     type (IPD_init_type),    intent(in) :: Init_parm
+    type (fv_atmos_type), intent(inout) :: Atm
     ! local
 
     character(len=128) :: fname
@@ -151,23 +147,28 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
        call get_tracer_names(MODEL_ATMOS, i, tracer_names(i))
        tracer_indicies(i)  = get_tracer_index(MODEL_ATMOS,tracer_names(i))
     enddo
-    allocate(s2c(is:ie,js:je,4))
-    allocate(id1(is:ie,js:je))
-    allocate(id2(is:ie,js:je))
-    allocate(jdc(is:ie,js:je))
-    allocate(agrid(is:ie,js:je,2))
+
 ! determine number of increment files to read, and the valid forecast hours
 
    nfilesall = size(IPD_Control%iau_inc_files)
    nfiles = 0
    if (is_master()) print*,'in iau_init',trim(IPD_Control%iau_inc_files(1)),IPD_Control%iaufhrs(1)
-   do k=1,nfilesall
-      if (trim(IPD_Control%iau_inc_files(k)) .eq. '' .or. IPD_Control%iaufhrs(k) .lt. 0) exit
-      if (is_master()) then
-         print *,k,trim(adjustl(IPD_Control%iau_inc_files(k)))
+
+   if (.not. Atm%flagstruct%compute_iau_inc) then
+      do k=1,nfilesall
+         if (trim(IPD_Control%iau_inc_files(k)) .eq. '' .or. IPD_Control%iaufhrs(k) .lt. 0) exit
+         if (is_master()) then
+            print *,k,trim(adjustl(IPD_Control%iau_inc_files(k)))
+         endif
+         nfiles = nfiles + 1
+      enddo
+   else
+      if (.not. Atm%flagstruct%analysis_on_native_grid) then
+         nfiles = 1
+      else
+         print *, 'compute iau increment using analysis on native grid is under development'
       endif
-      nfiles = nfiles + 1
-   enddo
+   endif
    if (is_master()) print *,'nfiles = ',nfiles
    if (nfiles < 1) then
       return
@@ -187,76 +188,86 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
    dt = (IPD_Control%iau_delthrs*3600.)
    rdt = 1.0/dt
 
+   npz = IPD_Control%levs 
+
 !  set up interpolation weights to go from GSI's gaussian grid to cubed sphere
-    deg2rad = pi/180.
+   if (.not. Atm%flagstruct%compute_iau_inc .or. Atm%flagstruct%increment_file_on_native_grid) then
 
-    npz = IPD_Control%levs
-    fname = 'INPUT/'//trim(IPD_Control%iau_inc_files(1))
+      allocate(s2c(is:ie,js:je,4))
+      allocate(id1(is:ie,js:je))
+      allocate(id2(is:ie,js:je))
+      allocate(jdc(is:ie,js:je))
+      allocate(agrid(is:ie,js:je,2))
 
-    if( file_exists(fname) ) then
-      call open_ncfile( fname, ncid )        ! open the file
-      call get_ncdim1( ncid, 'lon',   im)
-      call get_ncdim1( ncid, 'lat',   jm)
-      call get_ncdim1( ncid, 'lev',   km)
+      deg2rad = pi/180.
 
-      if (km.ne.npz) then
-        if (is_master()) print *, 'km = ', km
-        call mpp_error(FATAL, &
-            '==> Error in IAU_initialize: km is not equal to npz')
+      fname = 'INPUT/'//trim(IPD_Control%iau_inc_files(1))
+
+      if( file_exists(fname) ) then
+        call open_ncfile( fname, ncid )        ! open the file
+        call get_ncdim1( ncid, 'lon',   im)
+        call get_ncdim1( ncid, 'lat',   jm)
+        call get_ncdim1( ncid, 'lev',   km)
+  
+        if (km.ne.npz) then
+          if (is_master()) print *, 'km = ', km
+          call mpp_error(FATAL, &
+              '==> Error in IAU_initialize: km is not equal to npz')
+        endif
+  
+        if(is_master())  write(*,*) fname, ' DA increment dimensions:', im,jm,km
+  
+        allocate (  lon(im) )
+        allocate (  lat(jm) )
+
+        call _GET_VAR1 (ncid, 'lon', im, lon )
+        call _GET_VAR1 (ncid, 'lat', jm, lat )
+        call close_ncfile(ncid)
+
+        ! Convert to radians
+        do i=1,im
+          lon(i) = lon(i) * deg2rad
+        enddo
+        do j=1,jm
+          lat(j) = lat(j) * deg2rad
+        enddo
+
+      else
+        call mpp_error(FATAL,'==> Error in IAU_initialize: Expected file '&
+            //trim(fname)//' for DA increment does not exist')
       endif
-
-      if(is_master())  write(*,*) fname, ' DA increment dimensions:', im,jm,km
-
-      allocate (  lon(im) )
-      allocate (  lat(jm) )
-
-      call _GET_VAR1 (ncid, 'lon', im, lon )
-      call _GET_VAR1 (ncid, 'lat', jm, lat )
-      call close_ncfile(ncid)
-
-      ! Convert to radians
-      do i=1,im
-        lon(i) = lon(i) * deg2rad
-      enddo
-      do j=1,jm
-        lat(j) = lat(j) * deg2rad
-      enddo
-
-    else
-      call mpp_error(FATAL,'==> Error in IAU_initialize: Expected file '&
-          //trim(fname)//' for DA increment does not exist')
-    endif
 
     ! Initialize lat-lon to Cubed bi-linear interpolation coeff:
     ! populate agrid
 !    print*,'is,ie,js,je=',is,ie,js,ie
 !    print*,'size xlon=',size(Init_parm%xlon(:,1)),size(Init_parm%xlon(1,:))
 !    print*,'size agrid=',size(agrid(:,1,1)),size(agrid(1,:,1)),size(agrid(1,1,:))
-    do j = 1,size(Init_parm%xlon,2)
-      do i = 1,size(Init_parm%xlon,1)
-!         print*,i,j,is-1+j,js-1+j
-         agrid(is-1+i,js-1+j,1)=Init_parm%xlon(i,j)
-         agrid(is-1+i,js-1+j,2)=Init_parm%xlat(i,j)
+      do j = 1,size(Init_parm%xlon,2)
+        do i = 1,size(Init_parm%xlon,1)
+!           print*,i,j,is-1+j,js-1+j
+           agrid(is-1+i,js-1+j,1)=Init_parm%xlon(i,j)
+           agrid(is-1+i,js-1+j,2)=Init_parm%xlat(i,j)
+        enddo
       enddo
-    enddo
-    call remap_coef( is, ie, js, je, is, ie, js, je, &
-        im, jm, lon, lat, id1, id2, jdc, s2c, &
-        agrid)
-    deallocate ( lon, lat,agrid )
+      call remap_coef( is, ie, js, je, is, ie, js, je, &
+          im, jm, lon, lat, id1, id2, jdc, s2c, &
+          agrid)
+      deallocate ( lon, lat,agrid )
+   endif
 
-    allocate(IAU_Data%ua_inc(is:ie, js:je, km))
-    allocate(IAU_Data%va_inc(is:ie, js:je, km))
-    allocate(IAU_Data%temp_inc(is:ie, js:je, km))
-    allocate(IAU_Data%delp_inc(is:ie, js:je, km))
-    allocate(IAU_Data%delz_inc(is:ie, js:je, km))
-    allocate(IAU_Data%tracer_inc(is:ie, js:je, km,ntracers))
+    allocate(IAU_Data%ua_inc(is:ie, js:je, npz))
+    allocate(IAU_Data%va_inc(is:ie, js:je, npz))
+    allocate(IAU_Data%temp_inc(is:ie, js:je, npz))
+    allocate(IAU_Data%delp_inc(is:ie, js:je, npz))
+    allocate(IAU_Data%delz_inc(is:ie, js:je, npz))
+    allocate(IAU_Data%tracer_inc(is:ie, js:je, npz,ntracers))
 ! allocate arrays that will hold iau state
-    allocate (iau_state%inc1%ua_inc(is:ie, js:je, km))
-    allocate (iau_state%inc1%va_inc(is:ie, js:je, km))
-    allocate (iau_state%inc1%temp_inc (is:ie, js:je, km))
-    allocate (iau_state%inc1%delp_inc (is:ie, js:je, km))
-    allocate (iau_state%inc1%delz_inc (is:ie, js:je, km))
-    allocate (iau_state%inc1%tracer_inc(is:ie, js:je, km,ntracers))
+    if(.not. allocated(iau_state%inc1%ua_inc)) allocate (iau_state%inc1%ua_inc(is:ie, js:je, npz))
+    if(.not. allocated(iau_state%inc1%va_inc)) allocate (iau_state%inc1%va_inc(is:ie, js:je, npz))
+    if(.not. allocated(iau_state%inc1%temp_inc)) allocate (iau_state%inc1%temp_inc (is:ie, js:je, npz))
+    if(.not. allocated(iau_state%inc1%delp_inc)) allocate (iau_state%inc1%delp_inc (is:ie, js:je, npz))
+    if(.not. allocated(iau_state%inc1%delz_inc)) allocate (iau_state%inc1%delz_inc (is:ie, js:je, npz))
+    if(.not. allocated(iau_state%inc1%tracer_inc)) allocate (iau_state%inc1%tracer_inc(is:ie, js:je, npz,ntracers))
 
     iau_state%hr1=IPD_Control%iaufhrs(1)
     iau_state%wt = 1.0 ! IAU increment filter weights (default 1.0)
@@ -281,31 +292,75 @@ subroutine IAU_initialize (IPD_Control, IAU_Data,Init_parm)
        enddo
        iau_state%wt_normfact = (2*nstep+1)/normfact
     endif
-    call read_iau_forcing(IPD_Control,iau_state%inc1,'INPUT/'//trim(IPD_Control%iau_inc_files(1)))
+    if ( Atm%flagstruct%increment_file_on_native_grid ) then
+       if (is_master()) print *, 'read increment on native grid'
+       call read_cubed_sphere_inc('INPUT/'//trim(IPD_Control%iau_inc_files(1)), iau_state%inc1, Atm)
+    elseif (Atm%flagstruct%compute_iau_inc ) then
+       if (.not. Atm%flagstruct%analysis_on_native_grid) then
+          if (is_master()) print *, 'increment computed beforehand'
+          call zero_inc(IPD_Control)
+          !if (Atm%flagstruct%write_iau_inc) then
+          !   call fv_io_write_iau_inc(Atm, iau_state%inc1, "atminc2")
+          !endif
+       else
+          if (is_master()) print *, 'to be added'
+       endif
+    else
+       call read_iau_forcing(IPD_Control,iau_state%inc1,'INPUT/'//trim(IPD_Control%iau_inc_files(1)))
+    endif
+
     if (nfiles.EQ.1) then  ! only need to get incrments once since constant forcing over window
        call setiauforcing(IPD_Control,IAU_Data,iau_state%wt)
     endif
 
     if (nfiles.GT.1) then  !have multiple files, but only read in 2 at a time and interpoalte between them
-       allocate (iau_state%inc2%ua_inc(is:ie, js:je, km))
-       allocate (iau_state%inc2%va_inc(is:ie, js:je, km))
-       allocate (iau_state%inc2%temp_inc (is:ie, js:je, km))
-       allocate (iau_state%inc2%delp_inc (is:ie, js:je, km))
-       allocate (iau_state%inc2%delz_inc (is:ie, js:je, km))
-       allocate (iau_state%inc2%tracer_inc(is:ie, js:je, km,ntracers))
+       allocate (iau_state%inc2%ua_inc(is:ie, js:je, npz))
+       allocate (iau_state%inc2%va_inc(is:ie, js:je, npz))
+       allocate (iau_state%inc2%temp_inc (is:ie, js:je, npz))
+       allocate (iau_state%inc2%delp_inc (is:ie, js:je, npz))
+       allocate (iau_state%inc2%delz_inc (is:ie, js:je, npz))
+       allocate (iau_state%inc2%tracer_inc(is:ie, js:je, npz,ntracers))
        iau_state%hr2=IPD_Control%iaufhrs(2)
-       call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(2)))
+       if ( Atm%flagstruct%increment_file_on_native_grid ) then
+          call read_cubed_sphere_inc('INPUT/'//trim(IPD_Control%iau_inc_files(2)), iau_state%inc2, Atm)
+       else
+          call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(2)))
+       endif
     endif
 !   print*,'in IAU init',dt,rdt
-    IAU_data%drymassfixer = IPD_control%iau_drymassfixer
+    IAU_Data%drymassfixer = IPD_control%iau_drymassfixer
 
 end subroutine IAU_initialize
 
-subroutine getiauforcing(IPD_Control,IAU_Data)
+subroutine IAU_state_initialize(Atm)
+
+   implicit none
+   type (fv_atmos_type), intent(in) :: Atm
+
+   integer :: isc,iec,jsc,jec,npz
+   
+   isc = Atm%bd%isc
+   iec = Atm%bd%iec
+   jsc = Atm%bd%jsc
+   jec = Atm%bd%jec
+   npz = Atm%npz
+   call get_number_tracers(MODEL_ATMOS, num_tracers=ntracers)
+
+   allocate(iau_state%inc1%ua_inc(isc:iec, jsc:jec, npz))
+   allocate(iau_state%inc1%va_inc(isc:iec, jsc:jec, npz))
+   allocate(iau_state%inc1%temp_inc(isc:iec, jsc:jec, npz))
+   allocate(iau_state%inc1%delp_inc(isc:iec, jsc:jec, npz))
+   allocate(iau_state%inc1%delz_inc(isc:iec, jsc:jec, npz))
+   allocate(iau_state%inc1%tracer_inc(isc:iec, jsc:jec, npz, ntracers))
+
+end subroutine IAU_state_initialize
+
+subroutine getiauforcing(IPD_Control,IAU_Data,Atm)
 
    implicit none
    type (IPD_control_type), intent(in) :: IPD_Control
    type(IAU_external_data_type),  intent(inout) :: IAU_Data
+   type (fv_atmos_type), intent(inout) :: Atm
    real(kind=kind_phys) t1,t2,sx,wx,wt,dtp
    integer n,i,j,k,sphum,kstep,nstep,itnext
 
@@ -379,7 +434,11 @@ subroutine getiauforcing(IPD_Control,IAU_Data)
             iau_state%hr2=IPD_Control%iaufhrs(itnext)
             iau_state%inc1=iau_state%inc2
             if (is_master()) print *,'reading next increment file',trim(IPD_Control%iau_inc_files(itnext))
-            call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(itnext)))
+            if ( Atm%flagstruct%increment_file_on_native_grid ) then
+               call read_cubed_sphere_inc('INPUT/'//trim(IPD_Control%iau_inc_files(itnext)), iau_state%inc2, Atm)
+            else
+               call read_iau_forcing(IPD_Control,iau_state%inc2,'INPUT/'//trim(IPD_Control%iau_inc_files(itnext)))
+            endif
          endif
          call updateiauforcing(IPD_Control,IAU_Data,iau_state%wt)
       endif
@@ -442,7 +501,7 @@ subroutine updateiauforcing(IPD_Control,IAU_Data,wt)
 
 subroutine read_iau_forcing(IPD_Control,increments,fname)
     type (IPD_control_type), intent(in) :: IPD_Control
-    type(iau_internal_data_type), intent(inout):: increments
+    type(increment_data_type), intent(inout):: increments
     character(len=*),  intent(in) :: fname
 !locals
     real, dimension(:,:,:), allocatable:: u_inc, v_inc
@@ -524,6 +583,38 @@ subroutine interp_inc(field_name,var,jbeg,jend)
     enddo
  enddo
 end subroutine interp_inc
+
+subroutine zero_inc(IPD_Control)
+
+   type (IPD_control_type), intent(in) :: IPD_Control
+   integer :: l
+
+   if(zero_increment('ua',IPD_Control)) iau_state%inc1%ua_inc(:,:,:) = 0.0
+   if(zero_increment('va',IPD_Control)) iau_state%inc1%va_inc(:,:,:) = 0.0
+   if(zero_increment('temp',IPD_Control)) iau_state%inc1%temp_inc(:,:,:) = 0.0
+   if(zero_increment('delp',IPD_Control)) iau_state%inc1%delp_inc(:,:,:) = 0.0
+   if(zero_increment('delz',IPD_Control)) iau_state%inc1%delz_inc(:,:,:) = 0.0
+   do l=1,ntracers
+      if(zero_increment(tracer_names(l),IPD_Control)) iau_state%inc1%tracer_inc(:,:,:,l) = 0.0
+   enddo
+
+end subroutine zero_inc
+
+logical function zero_increment(check_var,IPD_Control)
+
+   type (IPD_control_type), intent(in) :: IPD_Control
+   character(len=*), intent(in) :: check_var
+   integer :: i
+
+   zero_increment = .true.
+   do i=1,size(IPD_Control%iau_forcing_var)
+      if (trim(check_var) == trim(IPD_Control%iau_forcing_var(i))) then
+         zero_increment = .false.
+         return
+      endif
+   enddo
+
+end function zero_increment
 
 #endif
 

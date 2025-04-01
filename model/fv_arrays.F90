@@ -824,6 +824,10 @@ module fv_arrays_mod
                                        !< hard-coded levels in fv_eta. The default is .false.
    logical :: is_ideal_case = .false.    !< if .T., this is an ideal test case
    logical :: read_increment = .false.   !< read in analysis increment and add to restart
+   logical :: increment_file_on_native_grid = .false. !< increment is on native cubed sphere grid grid else on Gaussian grid
+   logical :: analysis_on_native_grid = .false. !< analysis is on native cubed sphere grid grid else on Gaussian grid
+   logical :: compute_iau_inc = .false.  !< if .T., compute IAU increment, while read in initial condition
+   logical :: write_iau_inc = .false.    !< if .T., write out computed iau increment
 ! Default restart files from the "Memphis" latlon FV core:
    character(len=128) :: res_latlon_dynamics = 'INPUT/fv_rst.res.nc'   !< If external_ic =.true.gives the filename of the
                                                                        !< input IC file. The default is 'INPUT/fv_rst.res.nc'.
@@ -1388,7 +1392,7 @@ module fv_arrays_mod
 !!!!!!!!!!!!!!
      type(FmsNetcdfFile_t) :: Fv_restart
      type(FmsNetcdfDomainFile_t) :: SST_restart, Fv_restart_tile, &
-          Rsf_restart, Mg_restart, Lnd_restart, Tra_restart
+          Rsf_restart, Mg_restart, Lnd_restart, Tra_restart, fv_iau_inc
      logical :: Fv_restart_is_open=.false.
      logical :: SST_restart_is_open=.false.
      logical :: Fv_restart_tile_is_open=.false.
@@ -1396,6 +1400,7 @@ module fv_arrays_mod
      logical :: Mg_restart_is_open=.false.
      logical :: Lnd_restart_is_open=.false.
      logical :: Tra_restart_is_open=.false.
+     logical :: fv_iau_inc_is_open=.false.
      type(fv_nest_type) :: neststruct
 
      !Hold on to coarse-grid global grid, so we don't have to waste processor time getting it again when starting to do grid nesting

@@ -63,6 +63,7 @@ module fv_io_mod
   use fv_grid_utils_mod,       only: cubed_a2d
   use fv_operators_mod,        only: remap_2d
   use constants_mod,           only: rvgas, rdgas, grav
+  use cubed_sphere_inc_mod,    only: increment_data_type
   
   implicit none
   private
@@ -72,6 +73,7 @@ module fv_io_mod
   public :: fv_io_register_restart_BCs
   public :: fv_io_write_BCs, fv_io_read_BCs
   public :: fv_io_register_axis
+  public :: fv_io_register_iau_inc, fv_io_write_iau_inc
 
   logical                       :: module_is_initialized = .FALSE.
 
@@ -451,7 +453,7 @@ contains
   ! </DESCRIPTION>
   subroutine  fv_io_read_restart(fv_domain,Atm,prefix,directory)
     type(domain2d),      intent(inout) :: fv_domain
-    type(fv_atmos_type), intent(inout) :: Atm(:)
+    type(fv_atmos_type), intent(inout) :: Atm
     character(len=*), optional, intent(in) :: prefix
     character(len=*), optional, intent(in) :: directory
 
@@ -476,91 +478,91 @@ contains
 
     suffix = ''
     fname = ''//trim(dir)//'/'//trim(pre)//'fv_core.res.nc'
-    Atm(1)%Fv_restart_is_open = open_file(Atm(1)%Fv_restart,fname,"read", is_restart=.true., pelist=pes)
-    if (Atm(1)%Fv_restart_is_open) then
-      call fv_io_register_restart(Atm(1))
-      call read_restart(Atm(1)%Fv_restart)
-      call close_file(Atm(1)%Fv_restart)
-      Atm(1)%Fv_restart_is_open = .false.
+    Atm%Fv_restart_is_open = open_file(Atm%Fv_restart,fname,"read", is_restart=.true., pelist=pes)
+    if (Atm%Fv_restart_is_open) then
+      call fv_io_register_restart(Atm)
+      call read_restart(Atm%Fv_restart)
+      call close_file(Atm%Fv_restart)
+      Atm%Fv_restart_is_open = .false.
     endif
     deallocate(pes)
 
-    if (Atm(1)%flagstruct%external_eta) then
-       call set_external_eta(Atm(1)%ak, Atm(1)%bk, Atm(1)%ptop, Atm(1)%ks)
+    if (Atm%flagstruct%external_eta) then
+       call set_external_eta(Atm%ak, Atm%bk, Atm%ptop, Atm%ks)
     endif
 
-    if ( use_ncep_sst .or. Atm(1)%flagstruct%nudge .or. Atm(1)%flagstruct%ncep_ic ) then
+    if ( use_ncep_sst .or. Atm%flagstruct%nudge .or. Atm%flagstruct%ncep_ic ) then
        call mpp_error(NOTE, 'READING FROM SST_RESTART DISABLED')
-       !call restore_state(Atm(1)%SST_restart)
+       !call restore_state(Atm%SST_restart)
     endif
 
     ntiles = mpp_get_ntile_count(fv_domain)
     !If the number of tiles is equal to 1, and it is not a nested case add the ".tile1" suffix to the filename
-    if (ntiles == 1 .and. .not. Atm(1)%neststruct%nested) then
+    if (ntiles == 1 .and. .not. Atm%neststruct%nested) then
        suffix = ''//trim(suffix)//'.tile1'
     endif
 
     fname = ''//trim(dir)//'/'//trim(pre)//'fv_core.res'//trim(suffix)//'.nc'
-    Atm(1)%Fv_restart_tile_is_open = open_file(Atm(1)%Fv_restart_tile, fname, "read", fv_domain, is_restart=.true.)
-    if (Atm(1)%Fv_restart_tile_is_open) then
-      call fv_io_register_restart(Atm(1))
-      call read_restart(Atm(1)%Fv_restart_tile, ignore_checksum=Atm(1)%flagstruct%ignore_rst_cksum)
-      call close_file(Atm(1)%Fv_restart_tile)
-      Atm(1)%Fv_restart_tile_is_open = .false.
-      if (Atm(1)%flagstruct%restart_from_agrid_winds) then
-         call cubed_a2d(Atm(1)%npx, Atm(1)%npy, Atm(1)%npz, &
-              Atm(1)%ua, Atm(1)%va, Atm(1)%u, Atm(1)%v, &
-              Atm(1)%gridstruct, Atm(1)%domain, Atm(1)%bd)
-         call mpp_update_domains(Atm(1)%u, Atm(1)%v, Atm(1)%domain, gridtype=DGRID_NE, complete=.true.)
+    Atm%Fv_restart_tile_is_open = open_file(Atm%Fv_restart_tile, fname, "read", fv_domain, is_restart=.true.)
+    if (Atm%Fv_restart_tile_is_open) then
+      call fv_io_register_restart(Atm)
+      call read_restart(Atm%Fv_restart_tile, ignore_checksum=Atm%flagstruct%ignore_rst_cksum)
+      call close_file(Atm%Fv_restart_tile)
+      Atm%Fv_restart_tile_is_open = .false.
+      if (Atm%flagstruct%restart_from_agrid_winds) then
+         call cubed_a2d(Atm%npx, Atm%npy, Atm%npz, &
+              Atm%ua, Atm%va, Atm%u, Atm%v, &
+              Atm%gridstruct, Atm%domain, Atm%bd)
+         call mpp_update_domains(Atm%u, Atm%v, Atm%domain, gridtype=DGRID_NE, complete=.true.)
       endif
     endif
 
 !--- restore data for fv_tracer - if it exists
     fname = ''//trim(dir)//'/'//trim(pre)//'fv_tracer.res'//trim(suffix)//'.nc'
-    Atm(1)%Tra_restart_is_open = open_file(Atm(1)%Tra_restart, fname, "read", fv_domain, is_restart=.true.)
-    if (Atm(1)%Tra_restart_is_open) then
-      call fv_io_register_restart(Atm(1))
-      call read_restart(Atm(1)%Tra_restart, ignore_checksum=Atm(1)%flagstruct%ignore_rst_cksum)
-      call close_file(Atm(1)%Tra_restart)
-      Atm(1)%Tra_restart_is_open = .false.
+    Atm%Tra_restart_is_open = open_file(Atm%Tra_restart, fname, "read", fv_domain, is_restart=.true.)
+    if (Atm%Tra_restart_is_open) then
+      call fv_io_register_restart(Atm)
+      call read_restart(Atm%Tra_restart, ignore_checksum=Atm%flagstruct%ignore_rst_cksum)
+      call close_file(Atm%Tra_restart)
+      Atm%Tra_restart_is_open = .false.
     else
       call mpp_error(NOTE,'==> Warning from fv_read_restart: Expected file '//trim(fname)//' does not exist')
     endif
 
 !--- restore data for surface winds - if it exists
     fname = ''//trim(dir)//'/'//trim(pre)//'fv_srf_wnd.res'//trim(suffix)//'.nc'
-    Atm(1)%Rsf_restart_is_open = open_file(Atm(1)%Rsf_restart, fname, "read", fv_domain, is_restart=.true.)
-    if (Atm(1)%Rsf_restart_is_open) then
-      Atm(1)%flagstruct%srf_init = .true.
-      call fv_io_register_restart(Atm(1))
-      call read_restart(Atm(1)%Rsf_restart, ignore_checksum=Atm(1)%flagstruct%ignore_rst_cksum)
-      call close_file(Atm(1)%Rsf_restart)
-      Atm(1)%Rsf_restart_is_open = .false.
+    Atm%Rsf_restart_is_open = open_file(Atm%Rsf_restart, fname, "read", fv_domain, is_restart=.true.)
+    if (Atm%Rsf_restart_is_open) then
+      Atm%flagstruct%srf_init = .true.
+      call fv_io_register_restart(Atm)
+      call read_restart(Atm%Rsf_restart, ignore_checksum=Atm%flagstruct%ignore_rst_cksum)
+      call close_file(Atm%Rsf_restart)
+      Atm%Rsf_restart_is_open = .false.
     else
       call mpp_error(NOTE,'==> Warning from fv_read_restart: Expected file '//trim(fname)//' does not exist')
-      Atm(1)%flagstruct%srf_init = .false.
+      Atm%flagstruct%srf_init = .false.
     endif
 
-    if ( Atm(1)%flagstruct%fv_land ) then
+    if ( Atm%flagstruct%fv_land ) then
 !--- restore data for mg_drag - if it exists
          fname = ''//trim(dir)//'/'//trim(pre)//'mg_drag.res'//trim(suffix)//'.nc'
-         Atm(1)%Mg_restart_is_open = open_file(Atm(1)%Mg_restart, fname, "read", fv_domain, is_restart=.true.)
-         if (Atm(1)%Mg_restart_is_open) then
-           call fv_io_register_restart(Atm(1))
-           call read_restart(Atm(1)%Mg_restart, ignore_checksum=Atm(1)%flagstruct%ignore_rst_cksum)
-           call close_file(Atm(1)%Mg_restart)
-           Atm(1)%Mg_restart_is_open = .false.
+         Atm%Mg_restart_is_open = open_file(Atm%Mg_restart, fname, "read", fv_domain, is_restart=.true.)
+         if (Atm%Mg_restart_is_open) then
+           call fv_io_register_restart(Atm)
+           call read_restart(Atm%Mg_restart, ignore_checksum=Atm%flagstruct%ignore_rst_cksum)
+           call close_file(Atm%Mg_restart)
+           Atm%Mg_restart_is_open = .false.
          else
            call mpp_error(NOTE,'==> Warning from fv_read_restart: Expected file '//trim(fname)//' does not exist')
          endif
 !--- restore data for fv_land - if it exists
          fname = ''//trim(dir)//'/'//trim(pre)//'/fv_land.res'//trim(suffix)//'.nc'
-         Atm(1)%Lnd_restart_is_open = open_file(Atm(1)%Lnd_restart, fname, "read", fv_domain, is_restart=.true.)
-         if (Atm(1)%Lnd_restart_is_open) then
-           call fv_io_register_restart(Atm(1))
-           call read_restart(Atm(1)%Lnd_restart, ignore_checksum=Atm(1)%flagstruct%ignore_rst_cksum)
-           call close_file(Atm(1)%Lnd_restart)
-           Atm(1)%Lnd_restart_is_open = .false.
+         Atm%Lnd_restart_is_open = open_file(Atm%Lnd_restart, fname, "read", fv_domain, is_restart=.true.)
+         if (Atm%Lnd_restart_is_open) then
+           call fv_io_register_restart(Atm)
+           call read_restart(Atm%Lnd_restart, ignore_checksum=Atm%flagstruct%ignore_rst_cksum)
+           call close_file(Atm%Lnd_restart)
+           Atm%Lnd_restart_is_open = .false.
          else
            call mpp_error(NOTE,'==> Warning from fv_read_restart: Expected file '//trim(fname)//' does not exist')
          endif
@@ -574,22 +576,22 @@ contains
 
 
   subroutine fv_io_read_tracers(Atm)
-    type(fv_atmos_type), intent(inout) :: Atm(:)
+    type(fv_atmos_type), intent(inout) :: Atm
     integer :: ntracers, ntprog, nt, isc, iec, jsc, jec
     character(len=6) :: stile_name
     character(len=64):: fname, tracer_name
     type(FmsNetcdfDomainFile_t) :: Tra_restart_r
     integer :: ntiles
 
-    isc = Atm(1)%bd%isc
-    iec = Atm(1)%bd%iec
-    jsc = Atm(1)%bd%jsc
-    jec = Atm(1)%bd%jec
+    isc = Atm%bd%isc
+    iec = Atm%bd%iec
+    jsc = Atm%bd%jsc
+    jec = Atm%bd%jec
     call get_number_tracers(MODEL_ATMOS, num_tracers=ntracers, num_prog=ntprog)
 
 ! fix for single tile runs where you need fv_core.res.nc and fv_core.res.tile1.nc
-    ntiles = mpp_get_ntile_count(Atm(1)%domain_for_read)
-    if(ntiles == 1 .and. .not. Atm(1)%neststruct%nested) then
+    ntiles = mpp_get_ntile_count(Atm%domain_for_read)
+    if(ntiles == 1 .and. .not. Atm%neststruct%nested) then
        stile_name = '.tile1'
     else
        stile_name = ''
@@ -597,19 +599,19 @@ contains
 
     fname = 'INPUT/fv_tracer.res'//trim(stile_name)//'.nc'
 
-    if (open_file(Tra_restart_r,fname,"read",Atm(1)%domain_for_read, is_restart=.true.)) then
+    if (open_file(Tra_restart_r,fname,"read",Atm%domain_for_read, is_restart=.true.)) then
     do nt = 2, ntprog
        call get_tracer_names(MODEL_ATMOS, nt, tracer_name)
-       call set_tracer_profile (MODEL_ATMOS, nt, Atm(1)%q(isc:iec,jsc:jec,:,nt)  )
+       call set_tracer_profile (MODEL_ATMOS, nt, Atm%q(isc:iec,jsc:jec,:,nt)  )
        if (variable_exists(Tra_restart_r, tracer_name)) then
-          call read_data(Tra_restart_r, tracer_name, Atm(1)%q(:,:,:,nt))
+          call read_data(Tra_restart_r, tracer_name, Atm%q(:,:,:,nt))
        endif
     enddo
     do nt = ntprog+1, ntracers
        call get_tracer_names(MODEL_ATMOS, nt, tracer_name)
-       call set_tracer_profile (MODEL_ATMOS, nt, Atm(1)%qdiag(isc:iec,jsc:jec,:,nt)  )
+       call set_tracer_profile (MODEL_ATMOS, nt, Atm%qdiag(isc:iec,jsc:jec,:,nt)  )
        if (variable_exists(Tra_restart_r, tracer_name)) then
-          call read_data (Tra_restart_r, tracer_name, Atm(1)%qdiag(:,:,:,nt))
+          call read_data (Tra_restart_r, tracer_name, Atm%qdiag(:,:,:,nt))
        endif
     enddo
     call close_file(Tra_restart_r)
@@ -825,7 +827,9 @@ contains
           j = (jsc + jec)/2
           k = npz_rst/2
           if( is_master() ) write(*,*) 'Calling read_da_inc',pt_r(i,j,k)
-          call read_da_inc(Atm(1), Atm(1)%domain)
+          call read_da_inc(Atm(1), Atm(1)%domain, Atm(1)%bd, npz_rst, ntprog, &
+               u_r, v_r, q_r, delp_r, pt_r, delz_r, isc, jsc, iec, jec, &
+               isc, jsc, iec, jec )
           if( is_master() ) write(*,*) 'Back from read_da_inc',pt_r(i,j,k)
        endif
 !      ====== end PJP added DA functionailty======
@@ -1857,5 +1861,94 @@ contains
 
     return
   end subroutine fv_io_read_BCs
+
+  subroutine fv_io_register_iau_inc(Atm,increment_data)
+!-------------------------------------------------------------------------------
+!> @register increment fields
+!> @author Mingjing Tong <mingjing.tong@noaa.gov>
+!> @date 03/20/2025
+!-------------------------------------------------------------------------------
+
+    type(fv_atmos_type), intent(inout) :: Atm
+    type(increment_data_type), intent(in) :: increment_data
+
+    character(len=64) :: fname, tracer_name
+    integer, dimension(1) :: zsize
+    character(len=8), dimension(4)  :: dim_names_4d
+    integer           :: nt, ntracers
+
+    dim_names_4d(1) = "xaxis_1"
+    dim_names_4d(2) = "yaxis_1"
+    dim_names_4d(3) = "zaxis_1"
+    dim_names_4d(4) = "Time"
+
+    call get_number_tracers(MODEL_ATMOS, num_tracers=ntracers)
+    if (Atm%fv_iau_inc_is_open) then
+       zsize = (/size(increment_data%ua_inc,3)/)
+       call fv_io_register_axis(Atm%fv_iau_inc, numx=1, numy=1, xpos=(/CENTER/), ypos=(/CENTER/), numz=1, zsize=zsize)
+       call register_restart_field(Atm%fv_iau_inc, 'ua_inc', increment_data%ua_inc, dim_names_4d)
+       call register_variable_attribute(Atm%fv_iau_inc, 'ua_inc', "long_name", "ua_inc", str_len=len("ua_inc"))
+       call register_variable_attribute(Atm%fv_iau_inc, 'ua_inc', "units", "none", str_len=len("none"))
+
+       call register_restart_field(Atm%fv_iau_inc, 'va_inc', increment_data%va_inc, dim_names_4d)
+       call register_variable_attribute(Atm%fv_iau_inc, 'va_inc', "long_name", "va_inc", str_len=len("va_inc"))
+       call register_variable_attribute(Atm%fv_iau_inc, 'va_inc', "units", "none", str_len=len("none"))
+
+       call register_restart_field(Atm%fv_iau_inc, 'T_inc', increment_data%temp_inc, dim_names_4d)
+       call register_variable_attribute(Atm%fv_iau_inc, 'T_inc', "long_name", "T_inc", str_len=len("T_inc"))
+       call register_variable_attribute(Atm%fv_iau_inc, 'T_inc', "units", "none", str_len=len("none"))
+
+       call register_restart_field(Atm%fv_iau_inc, 'delp_inc', increment_data%delp_inc, dim_names_4d)
+       call register_variable_attribute(Atm%fv_iau_inc, 'delp_inc', "long_name", "delp_inc", str_len=len("delp_inc"))
+       call register_variable_attribute(Atm%fv_iau_inc, 'delp_inc', "units", "none", str_len=len("none"))
+       if (.not.Atm%flagstruct%hydrostatic) then
+         call register_restart_field(Atm%fv_iau_inc, 'delz_inc', increment_data%delz_inc, dim_names_4d, is_optional=.true.)
+         if (variable_exists(Atm%fv_iau_inc, 'delz_inc')) then
+            call register_variable_attribute(Atm%fv_iau_inc, 'delz_inc', "long_name", "delz_inc", str_len=len("delz_inc"))
+            call register_variable_attribute(Atm%fv_iau_inc, 'delz_inc', "units", "none", str_len=len("none"))
+         endif
+       endif
+
+       do nt = 1, ntracers
+          call get_tracer_names(MODEL_ATMOS, nt, tracer_name)
+          call register_restart_field(Atm%fv_iau_inc, trim(tracer_name)//'_inc', increment_data%tracer_inc(:,:,:,nt), &
+                                      dim_names_4d)
+          call register_variable_attribute(Atm%fv_iau_inc, trim(tracer_name)//'_inc', "long_name", trim(tracer_name)//'_inc', &
+                                           str_len=len(trim(tracer_name)//'_inc'))
+          call register_variable_attribute(Atm%fv_iau_inc, trim(tracer_name)//'_inc', "units", "none", str_len=len("none"))
+       enddo
+    endif
+
+  end subroutine fv_io_register_iau_inc
+
+  subroutine fv_io_write_iau_inc(Atm, increment_data, prefix, directory)
+!-------------------------------------------------------------------------------
+!> @write data to restart files
+!> @author Mingjing Tong <mingjing.tong@noaa.gov>
+!> @date 03/19/2025
+!-------------------------------------------------------------------------------
+    type(fv_atmos_type), intent(inout)       :: Atm
+    type(increment_data_type), intent(in)    :: increment_data
+    character(len=*), optional, intent(in)   :: prefix
+    character(len=*), optional, intent(in)   :: directory
+
+    character (len=:), allocatable :: dir, pre, fname, suffix
+
+    pre = 'atminc'
+    dir='ATMINC'
+    if (present(prefix)) pre = ''//trim(prefix)
+    if (present(directory)) dir = trim(directory)
+
+    fname = ''//trim(dir)//'/'//trim(pre)//'.nc'
+    Atm%fv_iau_inc_is_open = open_file(Atm%fv_iau_inc, trim(fname), "overwrite", Atm%domain, &
+                                       is_restart=.true.)
+    if (Atm%fv_iau_inc_is_open) then
+      call fv_io_register_iau_inc(Atm,increment_data)
+      call write_restart(Atm%fv_iau_inc)
+      call close_file(Atm%fv_iau_inc)
+      Atm%fv_iau_inc_is_open = .false.
+    endif
+
+  end subroutine fv_io_write_iau_inc
 
 end module fv_io_mod

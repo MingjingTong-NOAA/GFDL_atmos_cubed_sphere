@@ -18,8 +18,17 @@
 !* License along with the FV3 dynamical core.
 !* If not, see <http://www.gnu.org/licenses/>.
 !***********************************************************************
-!-------------------------------------------------------------------------------
-!> @brief Treat DA increment
+
+!>@brief 'The module 'tread_da_increment' contains routines for treating the increments
+!! of the prognostic variables that are calculated by the DA process
+!>@details This module includes functions to read in the externally calculated increments
+!! and applies the increments to the restart variables. Specifically, if the increments are
+!! zero, FV3 should reproduce directly from the restart files.
+!>@note Please treat the following subroutines as API interfaces, and consult the FV3 team
+!! code modification proposal.
+!>@warning Expanding the list of increments without the proper knowledge of the FV3 dynamical
+!! core is EXTREMELY RISKY, especially for the non-hydrostatic scenario. Such a modification
+!! could break the scientific consistency, possibly leading to a simulation crash.
 !> @author Xi.Chen <xi.chen@noaa.gov>
 !> @date 02/12/2016
 !
@@ -62,12 +71,17 @@ module fv_treat_da_inc_mod
   use fv_grid_utils_mod, only: ptop_min, g_sum, &
                                mid_pt_sphere, get_unit_vect2, &
                                get_latlon_vector, inner_prod, &
-                               cubed_to_latlon
+                               cubed_to_latlon, &
+                               update2d_dwinds_phys, &
+                               update_dwinds_phys
   use fv_mp_mod,         only: is_master, &
                                fill_corners, &
                                YDir, &
                                mp_reduce_min, &
-                               mp_reduce_max
+                               mp_reduce_max, &
+                               group_halo_update_type, &
+                               start_group_halo_update, &
+                               complete_group_halo_update
   use sim_nc_mod,        only: open_ncfile, &
                                close_ncfile, &
                                get_ncdim1, &
@@ -76,22 +90,34 @@ module fv_treat_da_inc_mod
                                get_var3_r4, &
                                get_var1_real, &
                                check_var_exists
+  use cubed_sphere_inc_mod, only: read_cubed_sphere_inc, &
+                                  increment_data_type
   implicit none
   private
 
-  public :: read_da_inc,remap_coef
+  public :: read_da_inc, read_da_inc_cubed_sphere, remap_coef
 
 contains
   !=============================================================================
-  !> @brief description
-  !> @author Xi.Chen <xi.chen@noaa.gov>
-  !> @date 02/12/2016
+  !>@brief The subroutine 'read_da_inc' reads the increments of the diagnostic variables
+  !! from the DA-generated files on a lat-lon grid.
+  !>@details Additional support of prognostic variables such as tracers can be assessed
+  !! and added upon request.
+  !>@author Xi.Chen <xi.chen@noaa.gov>
+  !>@date 02/12/2016
+   subroutine read_da_inc(Atm, fv_domain, bd, npz_in, nq, u, v, q, delp, pt, delz, is_in, js_in, ie_in, je_in,  &
+                                                                                   isc_in, jsc_in, iec_in, jec_in )
+    type(fv_atmos_type),       intent(inout) :: Atm
+    type(domain2d),            intent(inout) :: fv_domain
+    type(fv_grid_bounds_type), intent(IN) :: bd
+    integer,                   intent(IN) :: npz_in, nq, is_in, js_in, ie_in, je_in, isc_in, jsc_in, iec_in, jec_in
+    real, intent(inout), dimension(is_in:ie_in,  js_in:je_in+1,npz_in):: u  ! D grid zonal wind (m/s)
+    real, intent(inout), dimension(is_in:ie_in+1,js_in:je_in  ,npz_in):: v  ! D grid meridional wind (m/s)
+    real, intent(inout) :: delp(is_in:ie_in  ,js_in:je_in  ,npz_in)  ! pressure thickness (pascal)
+    real, intent(inout) :: pt(  is_in:ie_in  ,js_in:je_in  ,npz_in)  ! temperature (K)
+    real, intent(inout) :: q(   is_in:ie_in  ,js_in:je_in  ,npz_in, nq)  !
+    real, intent(inout) :: delz(isc_in:iec_in  ,jsc_in:jec_in  ,npz_in)  !
 
-  !> Do NOT Have delz increment available yet
-  !> EMC reads in delz increments but does NOT use them!!
-  subroutine read_da_inc(Atm, fv_domain)
-    type(fv_atmos_type), intent(inout) :: Atm
-    type(domain2d),      intent(inout) :: fv_domain
     ! local
     real :: deg2rad
     character(len=128) :: fname
@@ -111,7 +137,7 @@ contains
     integer, dimension(Atm%bd%is:Atm%bd%ie,Atm%bd%js:Atm%bd%je+1)::&
         id1_d, id2_d, jdc_d
 
-    integer:: i, j, k, im, jm, km, npz, npt
+    integer:: i, j, k, im, jm, km, npt
     integer:: i1, i2, j1, ncid
     integer:: jbeg, jend
     integer tsize(3)
@@ -121,7 +147,6 @@ contains
     logical:: found, cliptracers
     integer :: is,  ie,  js,  je
     integer :: isd, ied, jsd, jed
-    integer :: isc, iec, jsc, jec
     integer :: sphum, liq_wat, o3mr, ice_wat
     integer :: snowwat, rainwat, graupel
 
@@ -133,15 +158,8 @@ contains
     ied = Atm%bd%ied
     jsd = Atm%bd%jsd
     jed = Atm%bd%jed
-    isc = Atm%bd%isc
-    iec = Atm%bd%iec
-    jsc = Atm%bd%jsc
-    jec = Atm%bd%jec
-
 
     deg2rad = pi/180.
-
-    npz = Atm%npz
 
     cliptracers = .true.
 
@@ -155,10 +173,10 @@ contains
 
       im = tsize(1); jm = tsize(2); km = tsize(3)
 
-      if (km.ne.npz) then
+      if (km.ne.npz_in) then
         if (is_master()) print *, 'km = ', km
         call mpp_error(FATAL, &
-            '==> Error in read_da_inc: km is not equal to npz')
+            '==> Error in read_da_inc: km is not equal to npz_in')
       endif
 
       if(is_master())  write(*,*) fname, ' DA increment dimensions:', tsize
@@ -212,18 +230,18 @@ contains
     allocate ( wk3(1:im,jbeg:jend, 1:km) )
     allocate (  tp(is:ie,js:je,km) )
 
-    call apply_inc_on_3d_scalar('T_inc',Atm%pt,isd,jsd,ied,jed)
-    call apply_inc_on_3d_scalar('delp_inc',Atm%delp,isd,jsd,ied,jed)
-    if (.not. Atm%flagstruct%hydrostatic) then
-        call apply_inc_on_3d_scalar('delz_inc',Atm%delz,isc,jsc,iec,jec)
+    call apply_inc_on_3d_scalar('T_inc',pt, is_in, js_in, ie_in, je_in)
+    call apply_inc_on_3d_scalar('delp_inc',delp, is_in, js_in, ie_in, je_in)
+    if ( .not. Atm%flagstruct%hydrostatic ) then
+        call apply_inc_on_3d_scalar('delz_inc',delz, isc_in, jsc_in, iec_in, jec_in)
     endif
-    call apply_inc_on_3d_scalar('sphum_inc',Atm%q(:,:,:,sphum),isd,jsd,ied,jed,cliptracers)
-    call apply_inc_on_3d_scalar('liq_wat_inc',Atm%q(:,:,:,liq_wat),isd,jsd,ied,jed,cliptracers)
-    if(ice_wat > 0) call apply_inc_on_3d_scalar('icmr_inc',Atm%q(:,:,:,ice_wat),isd,jsd,ied,jed,cliptracers)
-    if(rainwat > 0) call apply_inc_on_3d_scalar('rwmr_inc',Atm%q(:,:,:,rainwat),isd,jsd,ied,jed,cliptracers)
-    if(snowwat > 0) call apply_inc_on_3d_scalar('snmr_inc',Atm%q(:,:,:,snowwat),isd,jsd,ied,jed,cliptracers)
-    if(graupel > 0) call apply_inc_on_3d_scalar('grle_inc',Atm%q(:,:,:,graupel),isd,jsd,ied,jed,cliptracers)
-    call apply_inc_on_3d_scalar('o3mr_inc',Atm%q(:,:,:,o3mr),isd,jsd,ied,jed,cliptracers)
+    call apply_inc_on_3d_scalar('sphum_inc',q(:,:,:,sphum),is_in,js_in,ie_in,je_in,cliptracers)
+    call apply_inc_on_3d_scalar('liq_wat_inc',q(:,:,:,liq_wat),is_in,js_in,ie_in,je_in,cliptracers)
+    if(ice_wat > 0) call apply_inc_on_3d_scalar('icmr_inc',q(:,:,:,ice_wat),is_in,js_in,ie_in,je_in,cliptracers)
+    if(rainwat > 0) call apply_inc_on_3d_scalar('rwmr_inc',q(:,:,:,rainwat),is_in,js_in,ie_in,je_in,cliptracers)
+    if(snowwat > 0) call apply_inc_on_3d_scalar('snmr_inc',q(:,:,:,snowwat),is_in,js_in,ie_in,je_in,cliptracers)
+    if(graupel > 0) call apply_inc_on_3d_scalar('grle_inc',q(:,:,:,graupel),is_in,js_in,ie_in,je_in,cliptracers)
+    call apply_inc_on_3d_scalar('o3mr_inc',q(:,:,:,o3mr),is_in,js_in,ie_in,je_in,cliptracers)
 
     deallocate ( tp )
     deallocate ( wk3 )
@@ -284,7 +302,7 @@ contains
           call get_latlon_vector(p3, ex, ey)
           vd_inc(i,j,k) = u_inc(i,j,k)*inner_prod(e2,ex) + &
                           v_inc(i,j,k)*inner_prod(e2,ey)
-          Atm%v(i,j,k) = Atm%v(i,j,k) + vd_inc(i,j,k)
+          v(i,j,k) = v(i,j,k) + vd_inc(i,j,k)
         enddo
       enddo
     enddo
@@ -337,7 +355,7 @@ contains
           call get_latlon_vector(p3, ex, ey)
           ud_inc(i,j,k) = u_inc(i,j,k)*inner_prod(e1,ex) + &
                           v_inc(i,j,k)*inner_prod(e1,ey)
-          Atm%u(i,j,k) = Atm%u(i,j,k) + ud_inc(i,j,k)
+          u(i,j,k) = u(i,j,k) + ud_inc(i,j,k)
         enddo
       enddo
     enddo
@@ -358,7 +376,9 @@ contains
     deallocate ( lon, lat )
 
   contains
-    !---------------------------------------------------------------------------
+   !---------------------------------------------------------------------------
+   !> @brief The subroutine 'apply_inc_on3d_scalar' applies the input increments
+   !! to the prognostic variables.
     subroutine apply_inc_on_3d_scalar(field_name,var,is_in,js_in,ie_in,je_in, &
                                       cliptracers)
       character(len=*), intent(in) :: field_name
@@ -368,6 +388,7 @@ contains
       integer :: ierr
       real :: clip
 
+      ! temporarily clip negative tracer. apply function fillq in the future 
       if (field_name == 'sphum_inc' .or. field_name == 'o3mr_inc') then
          clip=tiny(0.0)
       else
@@ -402,7 +423,191 @@ contains
     end subroutine apply_inc_on_3d_scalar
     !---------------------------------------------------------------------------
   end subroutine read_da_inc
+
   !=============================================================================
+  !>@brief The subroutine 'read_da_inc_cubed_sphere' reads increments of diagnostic variables
+  !! from DA-generated files on the native cubed-sphere grid.
+  !>@author David.New <david.new@noaa.gov>     
+  !>@date 05/16/2024  
+  subroutine read_da_inc_cubed_sphere(Atm, fv_domain, bd, npz_in, nq, &
+                                      u, v, q, delp, pt, delz, &
+                                      is_in, js_in, ie_in, je_in, isc_in, jsc_in, iec_in, jec_in)
+    type(fv_atmos_type),       intent(in)    :: Atm
+    type(domain2d),            intent(inout) :: fv_domain
+    type(fv_grid_bounds_type), intent(in)    :: bd
+    integer,                   intent(in)    :: npz_in, nq, is_in, js_in, ie_in, je_in, isc_in, jsc_in, iec_in, jec_in
+    real, intent(inout) :: u(is_in:ie_in, js_in:je_in+1, npz_in)  ! D grid zonal wind (m/s)
+    real, intent(inout) :: v(is_in:ie_in+1, js_in:je_in, npz_in)  ! D grid meridional wind (m/s)
+    real, intent(inout) :: delp(is_in:ie_in, js_in:je_in, npz_in)  ! pressure thickness (pascal)
+    real, intent(inout) :: pt(  is_in:ie_in, js_in:je_in, npz_in)  ! temperature (K)
+    real, intent(inout) :: q(   is_in:ie_in, js_in:je_in, npz_in, nq)  ! tracers
+    real, intent(inout) :: delz(isc_in:iec_in, jsc_in:jec_in, npz_in)  ! layer thickness
+    
+    character(len=128)           :: fname_prefix, fname
+    integer                      :: sphum, liq_wat, spo, spo2, spo3, o3mr, i, j, k, itracer
+    type(increment_data_type)    :: increment_data
+    type(group_halo_update_type) :: i_pack(2)
+    real                         :: ua_inc(is_in:ie_in, js_in:je_in, npz_in)
+    real                         :: va_inc(is_in:ie_in, js_in:je_in, npz_in)
+    character(len=1)             :: itile_str
+
+    ! Get increment filename
+    fname_prefix = 'INPUT/'//Atm%flagstruct%res_latlon_dynamics
+
+    ! Ensure file exists
+    write(itile_str, '(I0)') Atm%tile_of_mosaic
+    fname = trim(fname_prefix) // '.tile' // itile_str // '.nc'
+    if ( .not. file_exists(fname) ) then
+      call mpp_error(FATAL,'==> Error in read_da_inc_cubed_sphere: Expected file '&
+          //trim(fname)//' for DA increment does not exist')
+    endif
+
+    ! Allocate increments
+    allocate(increment_data%ua_inc(isc_in:iec_in,jsc_in:jec_in,npz_in))
+    allocate(increment_data%va_inc(isc_in:iec_in,jsc_in:jec_in,npz_in))
+    allocate(increment_data%temp_inc(isc_in:iec_in,jsc_in:jec_in,npz_in))
+    allocate(increment_data%delp_inc(isc_in:iec_in,jsc_in:jec_in,npz_in))
+    if ( .not. Atm%flagstruct%hydrostatic ) then
+       allocate(increment_data%delz_inc(isc_in:iec_in,jsc_in:jec_in,npz_in))
+    endif
+    allocate(increment_data%tracer_inc(isc_in:iec_in,jsc_in:jec_in,npz_in,nq))
+    
+    ! Read increments
+    fname = trim(fname_prefix) // '.nc'
+    call read_cubed_sphere_inc(fname, increment_data, Atm)
+
+    ! Wind increments
+    ! ---------------
+
+    ! Put u and v increments on grid that includes halo points
+    do k = 1,npz_in
+       do j = jsc_in,jec_in
+          do i = isc_in,iec_in
+             ua_inc(i,j,k) = increment_data%ua_inc(i,j,k)
+             va_inc(i,j,k) = increment_data%va_inc(i,j,k)
+          enddo
+       enddo
+    enddo
+
+    ! Start halo update
+    if ( Atm%gridstruct%square_domain ) then
+       call start_group_halo_update(i_pack(1), ua_inc, fv_domain, whalo=1, ehalo=1, shalo=1, nhalo=1, complete=.false.)
+       call start_group_halo_update(i_pack(1), va_inc, fv_domain, whalo=1, ehalo=1, shalo=1, nhalo=1, complete=.true.)
+    else
+       call start_group_halo_update(i_pack(1), ua_inc, fv_domain, complete=.false.)
+       call start_group_halo_update(i_pack(1), va_inc, fv_domain, complete=.true.)
+    endif
+
+    if ( Atm%flagstruct%dwind_2d ) then
+       ! Apply A-grid wind increments to D-grid winds for case of dwind_2d
+       call update2d_dwinds_phys(isc_in, iec_in, jsc_in, jec_in, is_in, ie_in, js_in, je_in, &
+                                 1., ua_inc, va_inc, u, v, &
+                                 Atm%gridstruct, Atm%npx, Atm%npy, npz_in, fv_domain)
+    else
+       ! Complete halo update
+       call complete_group_halo_update(i_pack(1), fv_domain)
+
+       ! Treat increment boundary conditions for case of regional grid
+       if ( Atm%gridstruct%regional ) then
+          ! Edges
+          if ( isc_in == 1 ) then
+             do k = 1,npz_in
+                do j = jsc_in,jec_in
+                   ua_inc(isc_in-1,j,k) = ua_inc(isc_in,j,k)
+                   va_inc(isc_in-1,j,k) = va_inc(isc_in,j,k)
+                enddo
+             enddo
+          endif
+          if ( iec_in == Atm%npx ) then
+             do k = 1,npz_in
+                do j = jsc_in,jec_in
+                   ua_inc(iec_in+1,j,k) = ua_inc(iec_in,j,k)
+                   va_inc(iec_in+1,j,k) = va_inc(iec_in,j,k)
+                enddo
+             enddo
+          endif
+          if ( jsc_in == 1 ) then
+             do k = 1,npz_in
+                do i = isc_in,iec_in
+                   ua_inc(i,jsc_in-1,k) = ua_inc(i,jsc_in,k)
+                   va_inc(i,jsc_in-1,k) = va_inc(i,jsc_in,k)
+                enddo
+             enddo
+          endif
+          if ( jec_in == Atm%npy ) then
+             do k = 1,npz_in
+                do i = isc_in,iec_in
+                   ua_inc(i,jec_in+1,k) = ua_inc(i,jec_in,k)
+                   va_inc(i,jec_in+1,k) = va_inc(i,jec_in,k)
+                enddo
+             enddo
+          endif
+
+          ! corners
+          do k = 1,npz_in
+             if ( isc_in == 1 .and. jsc_in == 1 ) then
+                ua_inc(isc_in-1,jsc_in-1,k) = ua_inc(isc_in,jsc_in,k)
+                va_inc(isc_in-1,jsc_in-1,k) = va_inc(isc_in,jsc_in,k)
+             elseif ( isc_in == 1 .and. jec_in == Atm%npy ) then
+                ua_inc(isc_in-1,jec_in+1,k) = ua_inc(isc_in,jec_in,k)
+                va_inc(isc_in-1,jec_in+1,k) = va_inc(isc_in,jec_in,k)
+             elseif ( iec_in == Atm%npx .and. jsc_in == 1 ) then
+                ua_inc(iec_in+1,jsc_in-1,k) = ua_inc(iec_in,jec_in,k)
+                va_inc(iec_in+1,jsc_in-1,k) = va_inc(iec_in,jec_in,k)
+             elseif ( iec_in == Atm%npx .and. jec_in == Atm%npy ) then
+                ua_inc(iec_in+1,jec_in+1,k) = ua_inc(iec_in,jec_in,k)
+                va_inc(iec_in+1,jec_in+1,k) = va_inc(iec_in,jec_in,k)
+             endif
+          enddo
+       endif
+
+       ! Apply A-grid wind increments to D-grid winds
+       call update_dwinds_phys(isc_in, iec_in, jsc_in, jec_in, is_in, ie_in, js_in, je_in, &
+                               1., ua_inc, va_inc, u, v, &
+                               Atm%gridstruct, Atm%npx, Atm%npy, npz_in, fv_domain)
+    endif
+
+    ! Remaining increments
+    ! --------------------
+    
+    ! Get tracer indices
+    sphum   = get_tracer_index(MODEL_ATMOS, 'sphum')
+    liq_wat = get_tracer_index(MODEL_ATMOS, 'liq_wat')
+#ifdef MULTI_GASES
+    spo     = get_tracer_index(MODEL_ATMOS, 'spo')
+    spo2    = get_tracer_index(MODEL_ATMOS, 'spo2')
+    spo3    = get_tracer_index(MODEL_ATMOS, 'spo3')
+#else
+    o3mr    = get_tracer_index(MODEL_ATMOS, 'o3mr')
+#endif
+
+    ! Apply increments
+    do k = 1,npz_in
+       do j = jsc_in,jec_in
+          do i = isc_in,iec_in
+             pt(i,j,k)   = pt(i,j,k)   + increment_data%temp_inc(i,j,k)
+             delp(i,j,k) = delp(i,j,k) + increment_data%delp_inc(i,j,k)
+             if ( .not. Atm%flagstruct%hydrostatic ) then
+                delz(i,j,k) = delz(i,j,k) + increment_data%delz_inc(i,j,k)
+             endif
+             q(i,j,k,sphum)   = q(i,j,k,sphum)   + increment_data%tracer_inc(i,j,k,sphum)
+             q(i,j,k,liq_wat) = q(i,j,k,liq_wat) + increment_data%tracer_inc(i,j,k,liq_wat)
+#ifdef MULTI_GASES
+             q(i,j,k,spo)     = q(i,j,k,spo)     + increment_data%tracer_inc(i,j,k,spo)
+             q(i,j,k,spo2)    = q(i,j,k,spo2)    + increment_data%tracer_inc(i,j,k,spo2)
+             q(i,j,k,spo3)    = q(i,j,k,spo3)    + increment_data%tracer_inc(i,j,k,spo3)
+#else
+             q(i,j,k,o3mr)    = q(i,j,k,o3mr)    + increment_data%tracer_inc(i,j,k,o3mr)
+#endif
+          enddo
+       enddo
+    enddo
+
+  end subroutine read_da_inc_cubed_sphere
+          
+  !=============================================================================
+  !>@brief The subroutine 'remap_coef' calculates the coefficients for horizonal regridding.
+
   subroutine remap_coef( is, ie, js, je, isd, ied, jsd, jed, &
       im, jm, lon, lat, id1, id2, jdc, s2c, agrid )
 
@@ -480,7 +685,10 @@ contains
 5000 continue   ! j-loop
 
   end subroutine remap_coef
+
   !=============================================================================
+  !>@brief The subroutine 'get_staggered_grid' gets the lat-lon locations of the
+  !! staggered points.
   subroutine get_staggered_grid( &
       is, ie, js, je, &
       isd, ied, jsd, jed, &

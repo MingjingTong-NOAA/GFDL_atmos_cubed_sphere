@@ -1310,6 +1310,13 @@ if ( is_master() ) write(*,*) 'CALL atmos_global_diag_init'
       enddo
    enddo
 
+   if (is_master()) then
+     fhr=time_type_to_real( Time_next - Atm(n)%Time_init )/3600.
+     if (fhr <= 12.0 .or. (fhr - int(fhr)) == 0.0) then
+        write(555,*) fhr, psdt_mean
+     endif
+   endif
+
 !Age of (PBL) air tracers --- lmh 21feb24
    lat_thresh = 15.*pi/180.
    t_aging = dt_atmos/86400. !days
